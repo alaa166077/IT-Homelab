@@ -1,1 +1,21 @@
+# OPNsense
 
+This file contains the deployment, configuration, networking, and troubleshooting documentation for the OPNsense firewall used in the SOC homelab environment.
+
+## Topics Covered
+- Initial installation and persistence setup
+- VirtualBox network architecture
+- WAN/LAN interface configuration
+- DHCP and routing validation
+- Internal network segmentation
+- Future integrations such as IDS/IPS, proxy filtering, HA, CARP, and pfSync
+
+## Current Status
+- OPNsense installed successfully
+- UFS configured on virtual disk
+- Persistent boot issue resolved
+- LAN configured as 10.200.200.254/24
+- Internal Network established using VirtualBox Intnet
+
+## Notes
+This firewall serves as the central gateway and security control point for the SOC homelab environment.
