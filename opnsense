@@ -19,3 +19,42 @@ This file contains the deployment, configuration, networking, and troubleshootin
 
 ## Notes
 This firewall serves as the central gateway and security control point for the SOC homelab environment.
+
+---
+
+# Suricata IDS/IPS Deployment
+
+## Objective
+Deploy Suricata IDS functionality on OPNsense and validate custom intrusion detection rules using simulated Nmap reconnaissance traffic.
+
+## Configuration Summary
+- Enabled Intrusion Detection features in OPNsense
+- Configured Suricata rule management
+- Hosted custom rules through Python HTTP server on Kali Linux
+- Imported external custom ruleset into OPNsense
+- Enabled custom ruleset within Intrusion Detection administration
+
+## Custom Rule Validation
+Initial rule deployment failed to generate alerts due to:
+- Incorrect XML structure
+- Inconsistent rule naming
+- Invalid subnet targeting
+- Old rule conflicts remaining in OPNsense
+
+## Corrective Actions
+- Removed old conflicting rule and XML files
+- Renamed rules consistently
+- Corrected XML formatting
+- Corrected subnet definition from host notation to network notation
+- Re-imported and re-enabled ruleset
+- Restarted Intrusion Detection service
+
+## Final Working Rule
+The final Suricata rule successfully detected SYN scan activity generated from Kali Linux using Nmap.
+
+## Validation Testing
+Nmap scan used:
+nmap -sS -Pn --top-ports 500 10.200.200.254
+
+## Result
+Suricata successfully generated intrusion detection alerts within OPNsense alert monitoring interface.
