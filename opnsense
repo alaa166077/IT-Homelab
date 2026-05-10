@@ -3,31 +3,37 @@
 This file contains the deployment, configuration, networking, and troubleshooting documentation for the OPNsense firewall used in the SOC homelab environment.
 
 ## Topics Covered
+
 - Initial installation and persistence setup
 - VirtualBox network architecture
 - WAN/LAN interface configuration
 - DHCP and routing validation
 - Internal network segmentation
-- Future integrations such as IDS/IPS, proxy filtering, HA, CARP, and pfSync
+- Suricata IDS/IPS deployment and custom rule validation
+- Transparent HTTP/HTTPS web proxy configuration
+- SSL inspection and category-based web filtering
+- Future integrations such as HA, CARP, and pfSync
 
 ## Current Status
+
 - OPNsense installed successfully
 - UFS configured on virtual disk
 - Persistent boot issue resolved
 - LAN configured as 10.200.200.254/24
 - Internal Network established using VirtualBox Intnet
-
-## Notes
-This firewall serves as the central gateway and security control point for the SOC homelab environment.
+- Suricata IDS/IPS active with custom detection rules
+- Squid transparent proxy active with SSL inspection and SquidGuard filtering
 
 ---
 
 # Suricata IDS/IPS Deployment
 
 ## Objective
+
 Deploy Suricata IDS functionality on OPNsense and validate custom intrusion detection rules using simulated Nmap reconnaissance traffic.
 
 ## Configuration Summary
+
 - Enabled Intrusion Detection features in OPNsense
 - Configured Suricata rule management
 - Hosted custom rules through Python HTTP server on Kali Linux
@@ -35,13 +41,16 @@ Deploy Suricata IDS functionality on OPNsense and validate custom intrusion dete
 - Enabled custom ruleset within Intrusion Detection administration
 
 ## Custom Rule Validation
+
 Initial rule deployment failed to generate alerts due to:
+
 - Incorrect XML structure
 - Inconsistent rule naming
 - Invalid subnet targeting
 - Old rule conflicts remaining in OPNsense
 
 ## Corrective Actions
+
 - Removed old conflicting rule and XML files
 - Renamed rules consistently
 - Corrected XML formatting
@@ -50,11 +59,137 @@ Initial rule deployment failed to generate alerts due to:
 - Restarted Intrusion Detection service
 
 ## Final Working Rule
+
 The final Suricata rule successfully detected SYN scan activity generated from Kali Linux using Nmap.
 
 ## Validation Testing
+
 Nmap scan used:
+
+```
 nmap -sS -Pn --top-ports 500 10.200.200.254
+```
 
 ## Result
+
 Suricata successfully generated intrusion detection alerts within OPNsense alert monitoring interface.
+
+---
+
+# Transparent Web Proxy and HTTPS Filtering
+
+## Objective
+
+Deploy transparent HTTP and HTTPS web proxy on OPNsense using Squid and SquidGuard to intercept, inspect, and filter all client web traffic without requiring manual browser proxy configuration.
+
+## Environment
+
+- OPNsense LAN IP: 10.200.200.254
+- LAN subnet: 10.200.200.0/24
+- Windows 10 client: 10.200.200.20
+- Squid HTTP port: 3128
+- Squid HTTPS intercept port: 3129
+
+## Configuration Summary
+
+- Installed Squid Web Proxy plugin on OPNsense
+- Enabled Transparent HTTP Proxy mode
+- Enabled SSL Inspection (HTTPS interception / SSL bump)
+- Created internal CA certificate named OPNsense-webca
+- Exported and installed CA certificate into Windows Trusted Root Certification Authorities
+- Configured NAT port forward rules: HTTP to 3128, HTTPS to 3129
+- Added LAN firewall rules to block direct HTTP and HTTPS bypass traffic
+- Added firewall rule to block QUIC (HTTP/3) on UDP port 443 to force TLS over TCP
+- Installed and enabled SquidGuard ACL blacklists
+- Enabled social networks category blocking
+
+## Key File and Path Reference
+
+| Item | Path |
+|------|------|
+| Squid configuration | /usr/local/etc/squid/squid.conf |
+| Access log | /var/log/squid/access.log |
+| Cache log | /var/log/squid/cache.log |
+| CA certificate | /var/squid/ssl/ca.pem |
+| SSL certificate database | /var/squid/ssl_crtd/ |
+| Certificate generator binary | /usr/local/libexec/squid/security_file_certgen |
+
+## Issues Encountered and Resolved
+
+### Issue 1 — SSL Certificate Database Not Initialized
+
+**Symptom:** Squid produced segmentation fault on restart and "exiting due to repeated, frequent failure" messages. No HTTPS traffic was intercepted.
+
+**Root Cause:** The ssl_crtd certificate store directory existed but was never initialized. Squid generates SSL certificates on demand and cannot function without this database. The initialization command also requires the directory to be created manually first — it cannot create it on its own.
+
+**Resolution:**
+
+```bash
+mkdir -p /var/squid/ssl_crtd
+chown squid:squid /var/squid/ssl_crtd
+chmod 700 /var/squid/ssl_crtd
+/usr/local/libexec/squid/security_file_certgen -c -s /var/squid/ssl_crtd -M 4MB
+chown -R squid:squid /var/squid/ssl_crtd
+service squid restart
+```
+
+Note: The correct binary path on OPNsense is /usr/local/libexec/squid/ and the correct database path is /var/squid/ssl_crtd. Both differ from older documentation.
+
+---
+
+### Issue 2 — QUIC Block Rule Too Broad, Breaking DNS
+
+**Symptom:** After adding a firewall rule to block QUIC traffic, all browsing from the Windows client stopped working entirely. Squid access log remained empty.
+
+**Root Cause:** The QUIC block rule was configured with protocol UDP and no destination port restriction, which blocked all UDP traffic from the LAN including DNS queries on UDP port 53. Without DNS resolution, the browser could not initiate any connections.
+
+**Resolution:** Updated the firewall rule to target UDP port 443 specifically.
+
+Correct LAN firewall rule order:
+
+| Order | Action | Protocol | Destination Port | Purpose |
+|-------|--------|----------|-----------------|---------|
+| 1 | Block | TCP/UDP | 80 | Block HTTP bypass |
+| 2 | Block | UDP | 443 | Block QUIC only |
+| 3 | Block | TCP/UDP | 443 | Block HTTPS bypass |
+| 4 | Allow | any | any | Default LAN allow |
+
+The Allow rule must always appear last. Any Allow rule above the Block rules will neutralize them.
+
+---
+
+### Issue 3 — Windows Client Bypassing OPNsense via Secondary Network Adapter
+
+**Symptom:** Squid access log remained completely empty even after fixing all other issues. tcpdump on the OPNsense LAN interface (em1) showed no HTTP or HTTPS traffic from the Windows client, only SSH session traffic.
+
+**Root Cause:** The Windows 10 VM had two active network adapters:
+
+- Ethernet 1 — VirtualBox NAT adapter, IP 10.0.2.15, gateway 10.0.2.2, with direct internet access
+- Ethernet 2 — OPNsense LAN adapter, IP 10.200.200.20, gateway 10.200.200.254
+
+Windows assigned lower metric (higher priority) to Ethernet 1, routing all browser traffic directly through the VirtualBox NAT adapter and bypassing OPNsense entirely. NAT redirect rules never fired because the traffic never arrived on em1.
+
+This is a security control bypass via alternate path — a dual-homed host with an uncontrolled secondary internet route renders all firewall and proxy controls ineffective.
+
+**Resolution:** Disabled the VirtualBox NAT adapter on the Windows VM in VirtualBox settings by changing Adapter 1 from NAT to Internal Network. This forced all traffic through OPNsense.
+
+All client VMs in this lab must use a single network adapter connected to the OPNsense Internal Network. No secondary NAT adapters should remain active.
+
+---
+
+## Known Limitations of Transparent HTTPS Filtering
+
+Modern browsers and websites have introduced protections that limit the effectiveness of transparent SSL interception. The following table documents what works and what does not in current environments.
+
+| Issue | Interceptable by Squid | Recommended Workaround |
+|-------|----------------------|------------------------|
+| QUIC / HTTP3 traffic | No — UDP-based, bypasses TCP Squid | Block UDP port 443 at firewall |
+| HSTS preloading | Partial | Clear browser HSTS cache for testing |
+| Certificate pinning (Facebook, Google) | No | DNS-based blocking via Unbound |
+| TLS 1.3 Encrypted Client Hello | No | DNS-based blocking via Unbound |
+
+For sites that cannot be intercepted through SSL bump, DNS-based blocking using OPNsense Unbound DNS overrides is the recommended alternative. This blocks at the resolution layer and is unaffected by transport-layer protections.
+
+## Result
+
+Transparent HTTP proxy and SSL inspection confirmed working. Client browser traffic is intercepted and logged by Squid. SquidGuard category filtering is active. Browser certificate chains show OPNsense-webca as the issuer for intercepted HTTPS connections.
