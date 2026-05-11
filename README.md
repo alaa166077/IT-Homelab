@@ -30,10 +30,15 @@ Building a SOC and network security homelab using OPNsense, Kali Linux, Wazuh, M
 - SSL inspection and certificate authority setup
 - Category-based web filtering with ACL blacklists
 - Firewall rules for proxy bypass prevention
+- High Availability firewall cluster (CARP + pfSync)
+- CARP Virtual IP configuration on WAN and LAN interfaces
+- pfSync firewall state synchronization between Master and Backup nodes
+- XML-RPC configuration replication
+- Outbound NAT with shared WAN Virtual IP for session continuity
+- Failover validation through live traffic interruption testing
 
 ## In Progress
 
-- High Availability (HA) / CARP / pfSync configuration
 - Multi-WAN failover and load balancing
 
 ## Planned
@@ -50,18 +55,22 @@ Building a SOC and network security homelab using OPNsense, Kali Linux, Wazuh, M
 ```
 Internet
 │
-VirtualBox NAT
+VirtualBox NAT Network (simulated ISP/WAN)
 │
-OPNsense WAN (em0)
+┌─────────────────────────────────────┐
+│     WAN CARP Virtual IP (shared)    │
+│  OPNsense Master — OPNsense Backup  │
+│  (Active)              (Passive)    │
+│         pfSync Sync Network         │
+│     LAN CARP Virtual IP (shared)    │
+└─────────────────────────────────────┘
 │
-OPNsense LAN (em1) — 10.200.200.254/24
-│
-Internal Network (Intnet)
+Internal Network (Intnet) — 10.200.200.0/24
 ├── Kali Linux        — 10.200.200.10
 └── Windows 10 Client — 10.200.200.20
 ```
 
-> All client VMs use OPNsense as their sole gateway and DNS server.
+> All client VMs use the shared LAN CARP Virtual IP as their gateway.
 > Client VMs must not have secondary NAT adapters to ensure all traffic flows through OPNsense security controls.
 
 ---
@@ -72,19 +81,20 @@ Internal Network (Intnet)
 - Kali Linux
 - Suricata IDS/IPS
 - Squid Web Proxy + SquidGuard
-- Wazuh
-- MISP
-- TheHive
-- Cortex
-- HA / CARP / pfSync
-- Multi-WAN Failover and Load Balancing
+- CARP / pfSync / High Availability
+- Wazuh (planned)
+- MISP (planned)
+- TheHive (planned)
+- Cortex (planned)
+- Multi-WAN Failover and Load Balancing (in progress)
 
 ---
 
 # Repository Structure
 
 - `README.md` — Main project overview and progress tracking
-- `opnsense` — OPNsense deployment, configuration, and troubleshooting notes
+- `opnsense` — OPNsense firewall deployment, IDS/IPS, and proxy configuration
+- `high-availability` — CARP, pfSync, and HA cluster configuration and validation
 
 ---
 
