@@ -1,0 +1,121 @@
+# High Availability — CARP, pfSync, and Firewall Redundancy
+
+This file documents the design, configuration, and validation of a fully redundant OPNsense High Availability firewall environment using CARP Virtual IPs and pfSync state synchronization.
+
+## Objective
+
+Eliminate the firewall as a single point of failure by deploying an active/passive HA cluster consisting of a Master and Backup OPNsense node, with synchronized firewall states and seamless Virtual IP failover.
+
+## Environment
+
+| Node | Role | WAN IP | LAN IP | Sync IP |
+|------|------|--------|--------|---------|
+| OPNsense-Master | Active | — | 10.200.200.251/24 | 10.0.0.1 |
+| OPNsense-Backup | Passive | — | 10.200.200.252/24 | 10.0.0.2 |
+| CARP VIP (WAN) | Shared virtual WAN identity | 10.0.2.254/24 | — | — |
+| CARP VIP (LAN) | Shared gateway for LAN clients | — | 10.200.200.254/24 | — |
+
+## Architecture Overview
+
+```
+Internet
+│
+VirtualBox NAT Network (simulated ISP/WAN segment)
+│
+┌──────────────────────────────────────────┐
+│    WAN CARP Virtual IP: 10.0.2.254/24    │
+│  Master (Active)    │   Backup (Passive)  │
+│  LAN: 10.200.200.251│   LAN: 10.200.200.252│
+│  Sync: 10.0.0.1     │   Sync: 10.0.0.2   │
+└──────────────────────────────────────────┘
+│                     │
+└─────── pfSync Sync Network (10.0.0.0/24) ┘
+│
+┌──────────────────────────────────────────┐
+│    LAN CARP Virtual IP: 10.200.200.254   │  ← Client gateway
+└──────────────────────────────────────────┘
+│
+Internal Network (Intnet) — 10.200.200.0/24
+├── Kali Linux        10.200.200.10
+└── Windows 10 Client 10.200.200.20
+```
+
+## Interface Configuration (Both Nodes)
+
+Each OPNsense node was configured with three network interfaces:
+
+| Interface | Purpose |
+|-----------|---------|
+| WAN (em0) | Uplink to ISP/internet segment |
+| LAN (em1) | Client-facing network |
+| SYNC (em2) | Dedicated pfSync state replication |
+
+A dedicated synchronization interface isolates HA traffic from production traffic, which is standard practice in HA deployments to prevent sync storms from affecting client traffic.
+
+## Key Concepts
+
+### CARP (Common Address Redundancy Protocol)
+
+CARP allows multiple firewalls to share a single Virtual IP address. Only the Master node actively owns the VIP at any given time. The Backup node monitors CARP advertisements and takes ownership automatically if the Master becomes unavailable.
+
+VHID (Virtual Host ID) groups and skew values define priority:
+- Lower skew = higher priority = Master role
+- Higher skew = lower priority = Backup role
+
+### pfSync
+
+pfSync replicates active firewall state table entries between nodes in real time. This ensures that existing TCP sessions survive failover without being reset — clients do not experience connection drops during a switchover event.
+
+### Shared Virtual Identity via Outbound NAT
+
+All outbound traffic was translated to the shared WAN CARP Virtual IP using a Hybrid outbound NAT rule. This ensures:
+- External systems always see the same source IP regardless of which node is active
+- Sessions remain active during failover
+- No IP change is visible to upstream systems or services
+
+Without this, each physical node would NAT traffic using its own physical WAN IP, causing session breaks during failover.
+
+## Configuration Summary
+
+- Cloned existing OPNsense VM to create the Backup node
+- Generated unique MAC addresses on all interfaces to prevent conflicts
+- Built dedicated VirtualBox NAT Network to simulate WAN segment
+- Assigned static IPs to all interfaces on both nodes
+- Configured firewall rules permitting CARP multicast and pfSync traffic on the sync interface
+- Created CARP Virtual IPs on both WAN and LAN interfaces with VHID groups and skew values
+- Enabled pfSync with the Backup node as the synchronization peer
+- Configured XML-RPC for full configuration replication from Master to Backup
+- Switched Outbound NAT to Hybrid mode
+- Created outbound NAT rule translating LAN traffic to the shared WAN Virtual IP
+
+## Failover Validation
+
+Failover was validated by simulating a Master node failure while monitoring client connectivity.
+
+Test method:
+
+```
+ping 10.200.200.254 -t
+```
+
+Steps performed:
+1. Started continuous ping from Windows client to the shared LAN Virtual IP
+2. Disconnected the Master firewall network interface to simulate failure
+3. Observed ping behavior during the failover transition
+4. Confirmed Backup node assumed ownership of the Virtual IP
+5. Confirmed ping continued with minimal interruption
+
+Result: Backup firewall successfully promoted to active state and client connectivity was maintained, confirming correct CARP failover and pfSync state replication.
+
+## Real-World Considerations Encountered
+
+- VM resource constraints affect HA timing and responsiveness in virtualized environments
+- Interface ordering must remain consistent between nodes to avoid misconfigured adapter assignments after cloning
+- MAC address conflicts between cloned VMs cause network instability and must be resolved before HA configuration begins
+- The synchronization network should always be a dedicated isolated segment, never shared with production LAN or WAN traffic
+
+## Key Lessons
+
+- Firewall HA is not just about redundant hardware — shared virtual identity through CARP VIPs is what makes failover seamless for clients and external systems
+- pfSync handles state-level continuity but outbound NAT to the shared VIP handles IP-level continuity — both are required for a complete HA solution
+- Failover validation through live traffic interruption is the only reliable way to confirm HA is working correctly — configuration alone is not sufficient proof
