@@ -1,0 +1,218 @@
+# Multi-WAN Failover
+
+This file documents the design, configuration, troubleshooting, and validation of Multi-WAN failover in the OPNsense SOC homelab using Gateway Groups and policy-based routing.
+
+## Objective
+
+Simulate two independent ISP connections and configure automatic failover between WAN1 and WAN2 so that if the primary WAN goes offline, traffic seamlessly routes through the secondary WAN without manual intervention.
+
+## Environment
+
+| Interface | VirtualBox Adapter | Network | Gateway | Monitor IP |
+|-----------|-------------------|---------|---------|------------|
+| WAN (em0) | Adapter 1 | NAT Network 1 — 10.0.2.0/24 | 10.0.2.1 | 8.8.4.4 |
+| LAN (em1) | Adapter 2 | Internal Network — 10.200.200.0/24 | 10.200.200.254 | — |
+| WAN2 (em2) | Adapter 3 | NAT Network 2 — 10.0.3.0/24 | 10.0.3.1 | 8.8.8.8 |
+
+## Architecture Overview
+
+```
+Internet
+│
+├── NAT Network 1 (10.0.2.0/24)       ├── NAT Network 2 (10.0.3.0/24)
+│   Gateway: 10.0.2.1                 │   Gateway: 10.0.3.1
+│   Monitor: 8.8.4.4                  │   Monitor: 8.8.8.8
+│                                     │
+WAN (em0) — Tier 1 (Primary)    WAN2 (em2) — Tier 2 (Failover)
+│                                     │
+└──────────── GW_Group ───────────────┘
+                   │
+          OPNsense LAN (em1)
+          10.200.200.254/24
+                   │
+       Internal Network (Intnet)
+       ├── Kali Linux  10.200.200.10
+       └── Windows 10  10.200.200.20
+```
+
+## Key Concepts
+
+### Gateway Groups
+
+A Gateway Group bundles multiple WAN gateways under a single logical group with assigned tier values. OPNsense routes traffic through the lowest available tier. If a Tier 1 gateway fails monitoring, traffic automatically shifts to Tier 2.
+
+| Tier | Gateway | Behavior |
+|------|---------|----------|
+| Tier 1 | WAN_DHCP — 10.0.2.1 | Primary — used when online |
+| Tier 2 | WAN2_DHCP — 10.0.3.1 | Failover — used when WAN1 fails |
+
+### Gateway Monitoring
+
+OPNsense monitors each gateway by sending ICMP probes to the assigned monitor IP. Gateway states:
+
+| Color | Meaning |
+|-------|---------|
+| 🟢 Green | Online — gateway reachable |
+| 🟡 Yellow | Degraded — packet loss or high latency |
+| 🔴 Red | Offline — gateway unreachable |
+
+### Policy-Based Routing
+
+Standard routing uses the system routing table. Policy-based routing uses LAN firewall rules to force specific traffic through a designated gateway group, overriding the default routing table on a per-rule basis.
+
+## Configuration Summary
+
+- Added WAN2 as a second OPNsense interface on Adapter 3 connected to NAT Network 2
+- Assigned gateways: WAN → 10.0.2.1, WAN2 → 10.0.3.1
+- Configured monitor IPs: WAN → 8.8.4.4, WAN2 → 8.8.8.8
+- Created Gateway Group (GW_Group) with WAN at Tier 1 and WAN2 at Tier 2
+- Added LAN firewall policy-routing rules directing LAN traffic through GW_Group
+- Added DNS routing rule for local DNS resolution
+- Configured Outbound NAT for both WAN and WAN2 interfaces
+- Disabled direct NAT adapter on Kali Linux to force traffic through OPNsense
+
+## Firewall Rules — LAN (Correct Order)
+
+| Order | Protocol | Source | Destination | Port | Gateway | Purpose |
+|-------|----------|--------|-------------|------|---------|---------|
+| 1 | IPv4 TCP/UDP | LAN net | 10.200.200.254 | 53 | default | Local DNS resolution |
+| 2 | IPv4 any | LAN net | any | any | GW_Group | Policy route through failover group |
+| 3 | IPv6 any | LAN net | any | any | default | Default IPv6 allow |
+
+> The DNS rule must always appear before the Gateway Group rule. Without it, DNS queries are routed through GW_Group and may fail during failover transitions.
+
+---
+
+## Issues Encountered and Resolved
+
+### Issue 1 — Kali Traffic Bypassing OPNsense
+
+**Symptom:** Traceroute showed a single hop directly to Google DNS without traversing OPNsense. Policy routing had no effect.
+
+**Root Cause:** Kali Linux had an active VirtualBox NAT adapter alongside the OPNsense LAN adapter. Windows used the lower-metric NAT adapter for all internet traffic, bypassing OPNsense and the Gateway Group entirely.
+
+**Resolution:** Disabled the VirtualBox NAT adapter on Kali and forced all traffic through OPNsense LAN gateway at 10.200.200.254.
+
+**Validation:** Traceroute after fix:
+```
+1  10.200.200.254   ← OPNsense LAN gateway ✓
+2  10.0.2.1         ← WAN1 upstream ✓
+3  ...further hops
+```
+
+> This is a recurring lab rule: all client VMs must have their VirtualBox NAT adapters disabled. Any active secondary NAT adapter bypasses all OPNsense controls.
+
+---
+
+### Issue 2 — WAN2 Gateway Bound to Wrong Interface
+
+**Symptom:** After disabling WAN1 to simulate failure, both WAN1 and WAN2 appeared offline instead of WAN2 taking over.
+
+**Root Cause:** The WAN2 gateway was incorrectly assigned to the WAN interface instead of the WAN2 interface. Both gateways were pointing at em0, so disabling WAN1 killed both paths simultaneously.
+
+**Resolution:** Corrected the interface binding for WAN2_DHCP gateway to point to the WAN2 interface (em2).
+
+---
+
+### Issue 3 — pfSync from EP5 HA Configuration Hijacking em2 (Root Cause of All WAN2 Issues)
+
+**Symptom:** WAN2 stuck at yellow/degraded state with 100% packet loss. ifconfig showed em2 with IP `10.0.0.2` instead of an address from NAT Network 2 (10.0.3.x). dhclient on em2 never received a lease from NAT Network 2.
+
+**Root Cause:** The High Availability configuration from EP5 left pfSync actively running on em2 with a hardcoded static IP of `10.0.0.2` (the old backup sync IP). When WAN2 was assigned to em2, pfSync owned the interface first and its static IP took precedence over DHCP from NAT Network 2. OPNsense gateway monitoring was trying to reach 8.8.8.8 through the 10.0.0.0/24 sync network — which had no internet path — causing permanent 100% packet loss.
+
+**ifconfig evidence:**
+```
+em2: description: WAN2 (opt1)
+     inet 10.0.0.2 netmask 0xffffff00    ← old pfSync IP, wrong network
+     syncdev: em2 syncpeer: 10.0.0.1     ← pfSync still active
+     groups: pfsync                       ← em2 still a sync interface
+```
+
+**Resolution:**
+
+Step 1 — Disabled pfSync in OPNsense GUI:
+```
+System → High Availability → Settings
+→ Uncheck "Synchronize States (pfsync)"
+→ Clear Synchronize Peer IP
+→ Save
+```
+
+Step 2 — Removed old static IP and renewed DHCP:
+```bash
+ifconfig em2 delete 10.0.0.2
+dhclient em2
+```
+
+Step 3 — DHCP result:
+```
+DHCPOFFER from 10.0.3.3
+Bound to 10.0.3.6    ← correct IP from NAT Network 2 ✓
+```
+
+Step 4 — Renewed WAN1 after reconnecting Adapter 1:
+```bash
+dhclient em0
+```
+
+Step 5 — Verified all IPs:
+```bash
+ifconfig -a | grep "inet "
+```
+```
+inet 10.200.200.254    ← LAN ✓
+inet 10.0.3.6          ← WAN2 correct ✓
+inet 127.0.0.1
+```
+
+> **Key lesson:** Always clean up previous episode configurations before starting a new lab setup. Leftover pfSync configuration from an HA deployment will silently conflict with any new interface assignment on the same adapter.
+
+---
+
+## Failover Validation
+
+Failover was validated by intentionally disabling WAN1 while monitoring traffic from Kali.
+
+**Test method:**
+
+1. Disabled WAN1 (Adapter 1) in VirtualBox to simulate ISP failure
+2. Confirmed WAN1 showed `status: no carrier` and no IPv4 address
+3. Verified WAN2 became the active default route:
+
+```bash
+netstat -rn | grep default
+# default route now points through 10.0.3.1 (WAN2)
+```
+
+4. Tested connectivity from Kali:
+```bash
+ping -c 4 8.8.8.8        ← internet reachable through WAN2 ✓
+traceroute 8.8.8.8
+```
+
+Traceroute result during failover:
+```
+1  10.200.200.254   ← OPNsense LAN ✓
+2  10.0.3.1         ← WAN2 gateway active ✓
+3  ...upstream hops
+```
+
+**Gateway status during test:**
+| Gateway | Status |
+|---------|--------|
+| WAN_DHCP (WAN1) | 🔴 Offline — intentionally disabled |
+| WAN2_DHCP (WAN2) | 🟢 Online — active and routing |
+
+**Result:** Failover confirmed working. Traffic automatically shifted from WAN1 to WAN2 with no manual intervention. Internet connectivity maintained through WAN2.
+
+---
+
+## Key Lessons
+
+- Multi-WAN failover combines routing, NAT, policy rules, gateway monitoring, and interface management simultaneously — a misconfiguration in any single layer affects all others
+- Always clean up previous lab configurations before starting a new episode setup — leftover HA/pfSync config silently hijacked the WAN2 interface
+- Gateway monitoring depends entirely on ICMP reachability — if the monitor IP is unreachable from the interface, the gateway will always appear degraded regardless of actual connectivity
+- Interface binding must be explicitly verified — a gateway pointing at the wrong interface produces misleading failure behavior
+- Policy routing rules require a DNS exception rule or DNS resolution breaks during failover transitions
+- Traceroute is the most effective tool for confirming whether traffic is traversing the intended path
+- VirtualBox NAT Networks behave differently from physical ISP connections and introduce ICMP constraints not present in real deployments
