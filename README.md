@@ -37,9 +37,12 @@ Building a SOC and network security homelab using OPNsense, Kali Linux, Wazuh, M
 - Outbound NAT with shared WAN Virtual IP for session continuity
 - Failover validation through live traffic interruption testing
 
+- Multi-WAN failover with Gateway Groups and policy-based routing
+- Failover validation through live WAN interface failure simulation
+
 ## In Progress
 
-- Multi-WAN failover and load balancing
+- Wazuh SIEM deployment
 
 ## Planned
 
@@ -95,6 +98,7 @@ Internal Network (Intnet) — 10.200.200.0/24
 - `README.md` — Main project overview and progress tracking
 - `opnsense` — OPNsense firewall deployment, IDS/IPS, and proxy configuration
 - `high-availability` — CARP, pfSync, and HA cluster configuration and validation
+- `multi-wan` — Multi-WAN failover, Gateway Groups, and policy-based routing
 
 ---
 
