@@ -1,0 +1,268 @@
+# Wazuh SIEM + XDR Deployment
+
+This file documents the deployment, configuration, network setup, troubleshooting, and agent installation of Wazuh v4.14.5 in the SOC homelab environment.
+
+## Objective
+
+Deploy Wazuh as an all-in-one SIEM and XDR platform to collect, analyze, and correlate security events from all endpoints in the lab, and later integrate with MISP, TheHive, and Cortex.
+
+## Deployment Decision
+
+The Wazuh platform can be deployed as separate components (server, indexer, dashboard on individual VMs) or as a single all-in-one appliance. For this lab, the **Wazuh OVA appliance v4.14.5** was chosen — it bundles the server, indexer, and dashboard into a single VM, which is appropriate for a homelab environment.
+
+## Environment
+
+| Component | Detail |
+|-----------|--------|
+| Wazuh Version | v4.14.5 |
+| Deployment Type | All-in-one OVA appliance |
+| Wazuh VM IP | 10.200.200.5/24 |
+| Gateway | 10.200.200.254 (OPNsense) |
+| Dashboard URL | https://10.200.200.5 |
+| Ubuntu Server IP | 10.200.200.21/24 |
+| Windows 10 IP | 10.200.200.20/24 |
+
+## Network Architecture
+
+```
+OPNsense — 10.200.200.254
+│
+Internal Network (intnet) — 10.200.200.0/24
+├── Wazuh Server    — 10.200.200.5   (SIEM + Dashboard)
+├── Windows 10      — 10.200.200.20  (Agent endpoint)
+└── Ubuntu Server   — 10.200.200.21  (Agent endpoint)
+```
+
+---
+
+## Phase 1 — Wazuh OVA Import and Network Setup
+
+### Initial Observations
+
+The Wazuh OVA was imported into VirtualBox successfully. On first boot the VM appeared to freeze at a console screen with no desktop environment. This was expected behavior — the Wazuh OVA is a server appliance and has no GUI. Boot completion is confirmed by seeing the login prompt on the console.
+
+Boot logs confirmed:
+- VBoxService started successfully
+- eth0 became ready
+- eth1 became ready
+
+The appliance detected two interfaces: eth0 and eth1.
+
+### VirtualBox Resource Reduction
+
+The OVA imports with maximum default resources which caused the host laptop to become unresponsive when running alongside other VMs.
+
+| Setting | OVA Default | Reduced To |
+|---------|------------|------------|
+| RAM | 8192 MB | 4096 MB |
+| CPUs | 4 | 2 |
+| Boot Order | Optical first | Hard Disk first |
+
+### Network Adapter Configuration
+
+The Wazuh OVA has two adapters. Adapter 1 was disabled (no NAT needed — internet routes through OPNsense). Adapter 2 was set to Internal Network (intnet) to connect to the lab network.
+
+The active interface inside the VM mapped to eth0 with altname enp0s8, confirming it corresponds to VirtualBox Adapter 2.
+
+---
+
+## Phase 2 — Static IP Configuration
+
+The network config file referenced in older tutorials (/etc/sysconfig/network-scripts/ifcfg-eth0) existed but contained leftover DHCP settings from the OVA import process.
+
+### Original File (Problematic)
+
+```
+DEVICE=eth0
+BOOTPROTO=none
+ONBOOT=yes
+TYPE=Ethernet
+USERCTL=yes
+PEERDNS=yes
+DHCPV6C=yes
+DHCPV6C_OPTIONSS=-nw
+PERSISTENT_DHCLIENT=yes
+RES_OPTIONS="timeout:2 attempts:5"
+```
+
+Problems: Missing IPADDR, NETMASK, GATEWAY, DNS1. Contained leftover DHCP-related lines.
+
+### Corrected File
+
+```
+DEVICE=eth0
+BOOTPROTO=none
+ONBOOT=yes
+TYPE=Ethernet
+NM_CONTROLLED=no
+NAME=eth0
+IPADDR=10.200.200.5
+NETMASK=255.255.255.0
+GATEWAY=10.200.200.254
+DNS1=8.8.8.8
+```
+
+Applied with:
+```bash
+sudo systemctl restart network
+```
+
+Static IP confirmed:
+```bash
+ip addr show eth0
+# inet 10.200.200.5/24
+```
+
+---
+
+## Issues Encountered and Resolved
+
+### Issue 1 — OPNsense Not Running (Destination Host Unreachable)
+
+**Symptom:** Ping from Wazuh to OPNsense returned "Destination Host Unreachable" immediately after static IP was configured.
+
+**Root Cause:** OPNsense was not running. All lab connectivity depends on OPNsense being the first VM started. Without OPNsense, no gateway exists and no Layer 3 routing is possible.
+
+**Resolution:** Always start OPNsense first and wait for it to fully boot before starting any other VM.
+
+**Lab Startup Order:**
+| Order | VM | Wait For |
+|-------|----|---------|
+| 1st | OPNsense | Web GUI accessible |
+| 2nd | Wazuh | Console login prompt |
+| 3rd | Windows / Ubuntu | Desktop or login prompt |
+
+---
+
+### Issue 2 — OPNsense Had Conflicting HA and Multi-WAN Configuration
+
+**Symptom:** Using the OPNsense Master VM from EP5 caused IP conflicts and routing issues due to leftover CARP VIPs, pfSync, and Multi-WAN gateway group configuration.
+
+**Resolution:** Switched to the OPNsense Failover VM and cleaned up the following before starting the Wazuh lab:
+
+| Item | Action |
+|------|--------|
+| WAN2 interface | Removed |
+| Gateway Group (GW_Group) | Deleted |
+| Policy routing LAN rules | Deleted |
+| Block HTTP/HTTPS/QUIC rules | Deleted |
+| Outbound NAT | Reset to Automatic |
+| pfSync | Confirmed disabled |
+| LAN IP | Confirmed 10.200.200.254/24 |
+
+Removing the Block HTTP, HTTPS, and QUIC rules was critical — they would have prevented browser access to the Wazuh dashboard on port 443.
+
+---
+
+### Issue 3 — Wazuh Could Not Ping OPNsense or Windows (Asymmetric Connectivity)
+
+**Symptom:** Windows could ping Wazuh and access the dashboard, but Wazuh could not ping OPNsense or Windows. ARP table on Wazuh correctly showed MAC addresses for both.
+
+**Root Cause:** Expected asymmetric behavior. Windows Firewall blocks inbound ICMP from non-domain Linux hosts by default. OPNsense does not respond to ICMP directed at itself from LAN in some configurations.
+
+**Resolution:** No fix required. ARP resolution confirmed Layer 2 connectivity. The Wazuh dashboard loading over HTTPS confirmed full service-level connectivity. Ping is not a reliable connectivity test in mixed OS environments.
+
+---
+
+### Issue 4 — Windows Could Not Reach Internet (LAN Rule Disabled)
+
+**Symptom:** PowerShell failed to download the Wazuh agent with "remote name could not be resolved: packages.wazuh.com". Windows could not ping 8.8.8.8. DNS queries timed out even when directed at OPNsense.
+
+**Root Cause:** The Default allow LAN to any firewall rule in OPNsense was disabled. This single rule controls all outbound traffic from every LAN device. When disabled it silently blocks all routing, NAT, and DNS for all clients simultaneously.
+
+**Resolution:** Re-enabled the Default allow LAN to any rule in Firewall > Rules > LAN.
+
+This is the third instance in this lab where a single disabled OPNsense firewall rule caused complete silent network failure across all clients. Rule state should always be verified first when clients suddenly lose connectivity.
+
+---
+
+## Phase 3 — Wazuh Dashboard Access
+
+From Windows browser:
+```
+https://10.200.200.5
+```
+
+Default credentials:
+```
+Username: admin
+Password: admin
+```
+
+Dashboard loaded successfully confirming Wazuh server, indexer, and dashboard components are all operational.
+
+---
+
+## Phase 4 — Agent Installation
+
+### Windows 10 Agent
+
+Installed via PowerShell:
+```powershell
+Invoke-WebRequest -Uri https://packages.wazuh.com/4.x/windows/wazuh-agent-4.14.5-1.msi -OutFile $env:tmp\wazuh-agent; msiexec.exe /i $env:tmp\wazuh-agent /q WAZUH_MANAGER='10.200.200.5'
+```
+
+Started the agent service:
+```powershell
+NET START WazuhSvc
+```
+
+### Ubuntu Server 24.04 LTS Agent
+
+Ubuntu Server was deployed as a separate VM for agent testing.
+
+**VirtualBox settings:**
+| Setting | Value |
+|---------|-------|
+| RAM | 2048 MB |
+| CPUs | 1 |
+| Adapter 1 | Internal Network — intnet |
+
+**Static IP via Netplan (/etc/netplan/01-netcfg.yaml):**
+```yaml
+network:
+  version: 2
+  ethernets:
+    enp0s8:
+      dhcp4: false
+      addresses:
+        - 10.200.200.21/24
+      routes:
+        - to: default
+          via: 10.200.200.254
+      nameservers:
+        addresses: [10.200.200.254, 8.8.8.8]
+```
+
+Applied with:
+```bash
+sudo netplan apply
+```
+
+**SSH access from Windows:**
+```powershell
+ssh ubuntu@10.200.200.21
+```
+
+Note: openssh-server was not installed by default. Installed manually:
+```bash
+sudo apt update
+sudo apt install openssh-server -y
+sudo systemctl enable ssh
+sudo systemctl start ssh
+```
+
+Wazuh agent installed via Wazuh dashboard deployment instructions.
+
+---
+
+## Key Lessons
+
+- The Wazuh OVA is a headless server appliance — no desktop GUI is expected or needed
+- Always reduce OVA default resources before running alongside other lab VMs
+- OPNsense must always be the first VM started — it is the gateway for every other VM
+- Cleaning up previous episode configurations before starting a new lab phase prevents silent conflicts
+- A single disabled OPNsense LAN firewall rule silently breaks internet access for all clients
+- Ping asymmetry between Linux and Windows hosts is normal due to Windows Firewall ICMP rules — use HTTPS or TCP port tests for real connectivity validation
+- Ubuntu Server uses Netplan for network configuration, not the legacy ifcfg scripts used by the Wazuh OVA
+- SSH is not always pre-installed on Ubuntu Server — install openssh-server manually if needed
