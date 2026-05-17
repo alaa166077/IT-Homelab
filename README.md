@@ -36,17 +36,20 @@ Building a SOC and network security homelab using OPNsense, Kali Linux, Wazuh, M
 - XML-RPC configuration replication
 - Outbound NAT with shared WAN Virtual IP for session continuity
 - Failover validation through live traffic interruption testing
-
 - Multi-WAN failover with Gateway Groups and policy-based routing
 - Failover validation through live WAN interface failure simulation
+- Ubuntu Server 24.04 LTS deployment with static IP and SSH access
+- Wazuh v4.14.5 all-in-one deployment (server + indexer + dashboard)
+- Wazuh dashboard accessible via HTTPS
+- Wazuh agent deployed on Windows 10 client
+- Wazuh agent deployed on Ubuntu Server
 
 ## In Progress
 
-- Wazuh SIEM deployment
+- MISP threat intelligence platform deployment
 
 ## Planned
 
-- Wazuh SIEM deployment
 - MISP threat intelligence platform
 - TheHive incident response platform
 - Cortex analyzer integration
@@ -58,38 +61,35 @@ Building a SOC and network security homelab using OPNsense, Kali Linux, Wazuh, M
 ```
 Internet
 │
-VirtualBox NAT Network (simulated ISP/WAN)
+VirtualBox NAT (WAN)
 │
-┌─────────────────────────────────────┐
-│     WAN CARP Virtual IP (shared)    │
-│  OPNsense Master — OPNsense Backup  │
-│  (Active)              (Passive)    │
-│         pfSync Sync Network         │
-│     LAN CARP Virtual IP (shared)    │
-└─────────────────────────────────────┘
+OPNsense Firewall — 10.200.200.254/24
 │
-Internal Network (Intnet) — 10.200.200.0/24
+Internal Network (intnet) — 10.200.200.0/24
 ├── Kali Linux        — 10.200.200.10
-└── Windows 10 Client — 10.200.200.20
+├── Windows 10 Client — 10.200.200.20
+├── Ubuntu Server     — 10.200.200.21
+└── Wazuh v4.14.5     — 10.200.200.5
 ```
 
-> All client VMs use the shared LAN CARP Virtual IP as their gateway.
-> Client VMs must not have secondary NAT adapters to ensure all traffic flows through OPNsense security controls.
+> All VMs use OPNsense as their sole gateway (10.200.200.254) and DNS server.
+> No secondary NAT adapters on any VM — all traffic flows through OPNsense.
 
 ---
 
-# Technologies Planned
+# Technologies
 
 - OPNsense Firewall
 - Kali Linux
 - Suricata IDS/IPS
 - Squid Web Proxy + SquidGuard
 - CARP / pfSync / High Availability
-- Wazuh (planned)
-- MISP (planned)
+- Multi-WAN Failover and Load Balancing
+- Wazuh SIEM + XDR
+- Ubuntu Server 24.04 LTS
+- MISP (in progress)
 - TheHive (planned)
 - Cortex (planned)
-- Multi-WAN Failover and Load Balancing (in progress)
 
 ---
 
@@ -99,6 +99,7 @@ Internal Network (Intnet) — 10.200.200.0/24
 - `opnsense` — OPNsense firewall deployment, IDS/IPS, and proxy configuration
 - `high-availability` — CARP, pfSync, and HA cluster configuration and validation
 - `multi-wan` — Multi-WAN failover, Gateway Groups, and policy-based routing
+- `wazuh` — Wazuh SIEM deployment, agent installation, and configuration
 
 ---
 
