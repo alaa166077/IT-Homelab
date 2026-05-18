@@ -1,0 +1,150 @@
+# TheHive, Cortex & MISP Deployment
+
+This file documents the deployment of TheHive, Cortex, and MISP as Docker containers on a dedicated Ubuntu Server VM in the SOC homelab environment.
+
+## Objective
+
+Deploy the SOC investigation and threat intelligence stack using Docker Compose:
+- **TheHive** — Security incident response platform
+- **Cortex** — Observable analysis and active response engine
+- **MISP** — Threat intelligence sharing platform
+
+## Environment
+
+| Component | Detail |
+|-----------|--------|
+| Host OS | Ubuntu Server 24.04 LTS |
+| Host IP | 10.200.200.253/24 |
+| Gateway | 10.200.200.254 (OPNsense) |
+| Deployment Method | Docker Compose |
+| Docker Version | 26.x |
+
+## Architecture
+
+All services run as Docker containers on a single dedicated VM, connected via an internal Docker bridge network (SOC_NET). This isolates inter-service communication from the host network while exposing only the required ports externally.
+
+```
+Ubuntu SOC Server (10.200.200.253)
+│
+Docker Engine
+│
+SOC_NET (bridge network)
+├── TheHive       → port 9000
+├── Cortex        → port 9001
+├── MinIO         → port 9002 (console)
+├── Elasticsearch → port 9200
+├── Cassandra     → port 9042
+├── MISP          → port 80 / 443
+├── MISP MySQL    → internal only
+├── Redis         → internal only
+└── MISP Modules  → internal only
+```
+
+## Service Overview
+
+| Service | Image | Role |
+|---------|-------|------|
+| TheHive | strangebee/thehive:5.2 | Incident response platform |
+| Cortex | thehiveproject/cortex:latest | Analyzer and responder engine |
+| MISP | coolacid/misp-docker:core-latest | Threat intelligence platform |
+| Cassandra | cassandra:4 | TheHive backend database |
+| Elasticsearch | elasticsearch:7.17.9 | TheHive index backend |
+| MinIO | quay.io/minio/minio | TheHive object storage |
+| MySQL | mysql:8.0 | MISP backend database |
+| Redis | redis:latest | MISP caching layer |
+| MISP Modules | coolacid/misp-docker:modules-latest | MISP enrichment modules |
+
+## Access URLs
+
+| Service | URL |
+|---------|-----|
+| TheHive | http://10.200.200.253:9000 |
+| Cortex | http://10.200.200.253:9001 |
+| MinIO Console | http://10.200.200.253:9002 |
+| MISP | https://10.200.200.253 |
+
+## Docker Installation
+
+```bash
+sudo apt update
+sudo apt install ca-certificates curl gnupg -y
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu noble stable" | sudo tee /etc/apt/sources.list.d/docker.list
+sudo apt update
+sudo apt install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin -y
+sudo systemctl enable docker
+sudo systemctl start docker
+sudo usermod -aG docker $USER
+newgrp docker
+```
+
+## Required Directories
+
+Create these before running Docker Compose:
+
+```bash
+mkdir -p ~/docker-compose/cortex/logs
+touch ~/docker-compose/cortex/application.conf
+mkdir -p ~/docker-compose/server-configs
+mkdir -p ~/docker-compose/logs
+mkdir -p ~/docker-compose/files
+mkdir -p ~/docker-compose/ssl
+```
+
+## Docker Compose File
+
+Place `docker-compose.yml` inside `~/docker-compose/`.
+
+Key configuration decisions:
+- Cortex and MISP containers are named with `.local` suffix so TheHive GUI accepts them as FQDNs during integration
+- TheHive connects to MinIO via internal Docker network on port 9000 — only the MinIO console (9002) is exposed externally
+- Cortex shares the host Docker socket to launch analyzer containers on the host
+- All services communicate through the SOC_NET bridge network
+
+### Notable Fixes Applied to Original Tutorial File
+
+| Item | Original | Fixed |
+|------|----------|-------|
+| MinIO S3 endpoint | http://minio:9002 (console port) | http://minio:9000 (S3 API port) |
+| MySQL version | mysql/mysql-server:5.7 (EOL) | mysql:8.0 |
+| MySQL auth | default (breaks with MISP) | native password plugin added |
+| MISP HOSTNAME | https://10.0.2.10 (wrong IP) | https://10.200.200.253 |
+| MISP_BASEURL | localhost | https://10.200.200.253 |
+| Timezone | Europe/London | Asia/Riyadh |
+| Compose version field | version: "3.7" (deprecated) | removed |
+
+## Deployment
+
+```bash
+cd ~/docker-compose
+docker compose up -d
+```
+
+Verify all containers are running:
+
+```bash
+docker compose ps
+docker stats --no-stream
+```
+
+## Service Startup Times
+
+These services take time to initialize on first run — do not judge availability by browser until these times have passed:
+
+| Service | Expected Startup Time |
+|---------|----------------------|
+| Cassandra | 1-2 minutes |
+| Elasticsearch | 1-2 minutes |
+| TheHive | Up to 10 minutes (waits for Cassandra and ES) |
+| MISP | 2-3 minutes |
+| Cortex | 1-2 minutes |
+
+## Key Lessons
+
+- Cortex and MISP container names must use FQDN format (appending .local) for TheHive GUI integration to accept them
+- MinIO exposes two ports — port 9000 for the S3 API (internal only) and port 9002 for the web console. TheHive must connect to port 9000, not 9002
+- MySQL 5.7 reached end-of-life in October 2023 — always use MySQL 8.0 with the native password plugin for MISP compatibility
+- Always validate docker-compose.yml with python3 before running to catch syntax errors early
+- Cassandra and Elasticsearch must be fully initialized before TheHive becomes available — patience is required on first boot
